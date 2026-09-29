@@ -1,0 +1,35 @@
+#!/bin/sh
+# ================================================================
+# files/etc/uci-defaults/99-10-argon-theme
+#
+# 【作用】首次启动时将 Argon 设为 LuCI 系统默认主题。
+#
+#【运行机制】/etc/uci-defaults/ 下的脚本在系统首次启动时自动执行一次，
+#   执行成功（exit 0）后由系统自动删除，不会重复执行。
+#
+#【保护逻辑】仅当主题仍为出厂默认（bootstrap）或未设置时才改为 Argon；
+#   用户后期自行切换的其他主题（如 material）不会被覆盖，
+#   sysupgrade 升级后也能保留用户的主题选择。
+# ================================================================
+
+# 读取当前主题（uci get 在未设置时返回空）
+current="$(uci -q get luci.main.mediaurlbase || true)"
+
+case "$current" in
+	"/luci-static/argon")
+		# 已经是 Argon，无需处理
+		exit 0
+		;;
+	"/luci-static/bootstrap"|"")
+		# 出厂默认主题（bootstrap）或未设置 → 切换为 Argon
+		uci -q batch <<-EOF
+			set luci.main.mediaurlbase='/luci-static/argon'
+			commit luci
+		EOF
+		;;
+	*)
+		# 用户已自行选择其他主题，保留用户设置
+		;;
+esac
+
+exit 0

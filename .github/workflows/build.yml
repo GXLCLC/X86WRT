@@ -1,0 +1,237 @@
+# ================================================================
+# ImmortalWrt X86_64 云编译工作流
+#
+#【流程概览】拉取本仓库 → 清理 Runner 磁盘 → 安装编译依赖 →
+#   克隆 ImmortalWrt master 源码（最新内核）→ 植入 .config/files/scripts →
+#   恢复 dl/feeds/ccache 缓存 → 更新 feeds → 拉取第三方插件 →
+#   编译固件 → 扩容 rootfs_data(/overlay) 至 2G → 压缩 IMG →
+#   自动创建 Release（附固件信息：LAN IP / 登录账号密码 / 内核版本 /
+#   固件版本 / 已安装插件清单）
+#
+#【触发方式】
+#   1. 手动触发：Actions 页面点击 "Run workflow"；
+#   2. 推送触发：修改 .config / files / scripts / 本工作流后自动编译。
+#
+#【编译产物】仅 squashfs 格式的 X86_64 combined IMG 镜像
+#   （BIOS 与 UEFI 各一个，gzip 压缩），不生成 VHDX/VMDK 等其他格式。
+# ================================================================
+
+name: ImmortalWrt X86_64 云编译
+
+on:
+  # 手动触发（在仓库 Actions 页面点击 Run workflow）
+  workflow_dispatch:
+  # 推送代码自动触发：仅当编译相关文件有变动时才执行，
+  # 修改 README 等无关文件不会浪费编译时长
+  push:
+    branches:
+      - main
+      - master
+    paths:
+      - ".config"
+      - "files/**"
+      - "scripts/**"
+      - ".github/workflows/build.yml"
+
+# 【权限配置】Release 发布需要 contents: write 权限，
+# 不配置该项会导致创建 Release 时返回 403 权限错误
+permissions:
+  contents: write
+
+# 【并发控制】同一时间只保留一次编译任务，
+# 重复触发时自动取消进行中的旧任务，节省 Actions 时长
+concurrency:
+  group: immortalwrt-x86_64-build
+  cancel-in-progress: true
+
+# 【环境变量】ImmortalWrt 官方源码仓库与分支
+#   master 分支跟随最新内核版本，无需改动
+env:
+  IMMORTALWRT_REPO: https://github.com/immortalwrt/immortalwrt
+  IMMORTALWRT_BRANCH: master
+  # 编译产物目录（x86_64 平台固定路径）
+  BIN_DIR: bin/targets/x86/64
+
+jobs:
+  build:
+    name: 编译 ImmortalWrt X86_64 固件并发布
+    # 【编译环境】Ubuntu 22.04 LTS（官方 GitHub-hosted 标准镜像）
+    runs-on: ubuntu-22.04
+
+    steps:
+      # -------- 步骤 1/13：拉取本仓库 --------
+      # 获取编译配置 .config、首次启动脚本 files/、辅助脚本 scripts/
+      - name: 步骤 1/13：拉取本仓库（.config / files / scripts）
+        uses: actions/checkout@v4
+
+      # -------- 步骤 2/13：清理 Runner 磁盘空间 --------
+      # GitHub Runner 磁盘仅约 14GB，编译固件需要 25GB 以上空间，
+      # 删除预装的 Android SDK、.NET、编译器缓存等释放约 30GB
+      - name: 步骤 2/13：清理 Runner 磁盘空间（防止磁盘不足）
+        run: |
+          set -euo pipefail
+          sudo rm -rf /etc/apt/sources.list.d/* /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache /usr/local/share/boost /usr/local/.ghcup 2>/dev/null || true
+          # 清理 Docker 镜像缓存（Runner 自带 Docker）
+          sudo docker image prune -af >/dev/null 2>&1 || true
+          sudo -E apt-get -qq autoremove --purge >/dev/null 2>&1 || true
+          sudo -E apt-get -qq clean >/dev/null 2>&1 || true
+          echo "==> 磁盘空间统计："
+          df -h /
+
+      # -------- 步骤 3/13：安装编译依赖 --------
+      # 按 ImmortalWrt 官方文档在 Ubuntu 22.04 上安装全部编译依赖
+      - name: 步骤 3/13：安装编译依赖（Ubuntu 22.04）
+        run: |
+          set -euo pipefail
+          sudo -E apt-get update -y
+          sudo -E apt-get install -y ack antlr3 asciidoc autoconf automake autopoint binutils bison build-essential ccache clang cmake cpio curl device-tree-compiler ecj fastjar flex gawk gettext gcc gcc-multilib g++-multilib git gnutls-dev gperf haveged help2man intltool lib32gcc-s1 libc6-dev-i386 libglib2.0-dev libgmp3-dev libltdl-dev libmpc-dev libmpfr-dev libncurses-dev libncursesw5-dev libpython3-dev libreadline-dev libssl-dev libtool libyaml-dev libz-dev lld llvm mkisofs msmtp nano ninja-build optipng p7zip p7zip-full patch pkgconf python3 python3-pip python3-ply python3-docutils python3-setuptools python3-virtualenv qemu-utils re2c rsync scons squashfs-tools subversion swig texinfo uglifyjs upx-ucl unzip vim wget xmlto xxd zlib1g-dev zstd
+
+      # -------- 步骤 4/13：克隆 ImmortalWrt 源码 --------
+      # 浅克隆 master 分支（仅拉取最新一次提交，节省时间与磁盘）
+      - name: 步骤 4/13：克隆 ImmortalWrt master 源码（最新内核）
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --single-branch -b "$IMMORTALWRT_BRANCH" "$IMMORTALWRT_REPO" immortalwrt
+          # 记录源码版本信息（内核版本、提交号），便于发布信息展示
+          git -C immortalwrt log -1 --format="源码提交: %H (%cd)" --date=short
+
+      # -------- 步骤 5/13：植入编译配置与脚本 --------
+      # 将本仓库的 .config（可自行修改的增量配置）、files/（首次启动
+      # 默认主题与密码脚本）、scripts/（第三方插件拉取 / 分区扩容 /
+      # 固件信息生成脚本）复制进 ImmortalWrt 源码树参与编译
+      - name: 步骤 5/13：植入 .config 与 files / scripts 脚本
+        run: |
+          set -euo pipefail
+          cp -f .config immortalwrt/.config
+          mkdir -p immortalwrt/files
+          cp -a files/. immortalwrt/files/
+          cp -a scripts/. immortalwrt/scripts/
+          chmod +x immortalwrt/scripts/*.sh
+          echo "==> 已植入以下编译配置："
+          ls -l immortalwrt/scripts/ immortalwrt/files/etc/uci-defaults/
+
+      # -------- 步骤 6/13：恢复 dl 缓存 --------
+      # 缓存 dl/ 目录：所有源码包（kernel、软件包 tarball）的下载缓存，
+      # 缓存键关联 .config 内容：配置不变 → 直接复用上次下载；
+      # 配置变化 → 优先复用旧缓存中仍有效的部分
+      - name: 步骤 6/13：恢复 dl 源码包缓存
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/dl
+          key: dl-x86_64-${{ hashFiles('.config') }}-${{ github.run_id }}
+          restore-keys: |
+            dl-x86_64-${{ hashFiles('.config') }}-
+            dl-x86_64-
+
+      # -------- 步骤 7/13：恢复 feeds 缓存 --------
+      # 缓存 feeds/ 目录：feeds 软件包仓库（luci、packages 等）的
+      # git 克隆数据，feeds update 时只需增量拉取
+      - name: 步骤 7/13：恢复 feeds 软件包仓库缓存
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/feeds
+          key: feeds-x86_64-${{ env.IMMORTALWRT_BRANCH }}-${{ github.run_id }}
+          restore-keys: |
+            feeds-x86_64-${{ env.IMMORTALWRT_BRANCH }}-
+
+      # -------- 步骤 8/13：恢复 ccache 编译缓存 --------
+      # 缓存 .ccache 目录：编译器级别的对象文件缓存，
+      # 配置不变时软件包大部分编译结果可直接复用
+      #（按用户要求：不缓存 build_dir，toolchain 不复用）
+      - name: 步骤 8/13：恢复 ccache 编译缓存
+        uses: actions/cache@v4
+        with:
+          path: immortalwrt/.ccache
+          key: ccache-x86_64-${{ hashFiles('.config') }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-x86_64-${{ hashFiles('.config') }}-
+            ccache-x86_64-
+
+      # -------- 步骤 9/13：更新 feeds 并安装依赖 --------
+      # 按 ImmortalWrt 标准流程处理软件包依赖：
+      #   feeds update -a  更新全部软件包源
+      #   feeds install -a 将全部软件包源安装到源码树
+      - name: 步骤 9/13：更新 feeds 并安装软件包依赖
+        working-directory: immortalwrt
+        run: |
+          set -euo pipefail
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      # -------- 步骤 10/13：拉取第三方插件 --------
+      # 拉取规则：优先使用 ImmortalWrt 源码自带软件包；
+      # 仅当源码中不存在时，才从第三方仓库浅克隆所需插件目录
+      #（SmartDNS、DDNSTO、AdGuardHome、OAF、TurboAcc、Mwan3、
+      #  Argon 主题、argon-config、带宽监控、EasyTier、OpenClash）
+      - name: 步骤 10/13：拉取缺失的第三方插件（源码自带优先）
+        working-directory: immortalwrt
+        run: |
+          set -euo pipefail
+          bash scripts/packages.sh
+
+      # -------- 步骤 11/13：生成完整配置并预下载 --------
+      # make defconfig  将仓库内的增量 .config 自动补全为完整配置
+      # make download   预先下载全部源码包（失败可在此步骤提前暴露）
+      - name: 步骤 11/13：make defconfig 补全配置并预下载源码包
+        working-directory: immortalwrt
+        run: |
+          set -euo pipefail
+          make defconfig
+          make download -j"$(nproc)"
+          # 清理下载不完整的残缺文件（小于 1KB 视为无效）
+          find dl -size -1k -type f -delete 2>/dev/null || true
+
+      # -------- 步骤 12/13：编译固件 --------
+      # 多线程并行编译；若失败则自动切换单线程 + 完整日志重试，
+      # 便于在 Actions 日志中精确定位出错软件包
+      #【清理原则】本工作流绝不执行 make dirclean（会删除 toolchain
+      #   导致全量重编）；需要清理时仅使用 make clean。
+      #   CI 每次为全新环境无需手动清理，增量加速由 dl / feeds /
+      #   ccache 三项缓存承担。
+      - name: 步骤 12/13：编译固件（失败自动单线程重试）
+        working-directory: immortalwrt
+        run: |
+          set -euo pipefail
+          make -j"$(nproc)" || make -j1 V=s
+
+      # -------- 步骤 13/13：扩容分区 / 压缩镜像 / 发布 Release --------
+      # 1. 对 squashfs combined IMG 执行后置脚本，将 rootfs_data(/overlay)
+      #    可写空间精确扩容至 2048MiB（保留 fwtool 元数据，sysupgrade 校验不受影响）；
+      # 2. gzip 压缩镜像（扩容后镜像约 2.4GB，压缩后便于下载与存储）；
+      # 3. 汇总 Release 附件（IMG 镜像、config.buildinfo、SHA-256 校验表）；
+      # 4. 生成 Release 固件信息（LAN IP、登录账号密码、内核版本、
+      #    固件版本、已安装插件清单）并自动发布。
+      - name: 步骤 13/13：扩容 /overlay 至 2G 并发布 GitHub Release
+        working-directory: immortalwrt
+        env:
+          # 使用内置 GITHUB_TOKEN 创建 Release（顶部已配置 contents: write）
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # ---- 1. 扩容 rootfs_data 分区并压缩镜像 ----
+          for img in "$BIN_DIR"/*squashfs-combined*.img; do
+            bash scripts/post-build.sh "$img" 2048
+            gzip -9 "$img"
+          done
+
+          # ---- 2. 汇总 Release 附件 ----
+          mkdir -p release
+          cp -v "$BIN_DIR"/*squashfs-combined*.img.gz release/
+          cp -v "$BIN_DIR/config.buildinfo" release/
+          # 重新生成针对发布附件的 SHA-256 校验表
+          (cd release && sha256sum *.img.gz config.buildinfo > sha256sums)
+
+          # ---- 3. 生成 Release 固件信息 ----
+          # 标签格式：X86_64-日期-任务序号（任务序号保证唯一）
+          TAG="X86_64-$(TZ=Asia/Shanghai date +%Y%m%d)-${GITHUB_RUN_NUMBER}"
+          bash scripts/release-info.sh "$BIN_DIR" > release/release-notes.md
+
+          # ---- 4. 创建 Release 并上传附件 ----
+          gh release create "$TAG" \
+            --title "ImmortalWrt X86_64 ${TAG}" \
+            --notes-file release/release-notes.md \
+            --target "$GITHUB_SHA" \
+            release/*squashfs-combined*.img.gz release/config.buildinfo release/sha256sums
+
+          echo "==> Release 发布成功：${TAG}"
