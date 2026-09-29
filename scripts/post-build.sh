@@ -15,7 +15,8 @@
 #   1. 自动识别 MBR（BIOS）与 GPT（UEFI）两种 combined 镜像；
 #   2. 定位 squashfs 根分区，读取 squashfs 实际占用（bytes_used）；
 #   3. 扩大根分区，使 rootfs_data 可写空间 ≥ 指定大小（默认 2048MiB）；
-#   4. GPT 镜像同步迁移备份 GPT 表并重算 CRC32 校验；
+#   4. GPT 镜像同步更新备份 GPT 表并重算 CRC32 校验；
+#      原镜像无备份 GPT 表时（ptgen 默认省略 alternate 表），按规范补建；
 #   5. 完整保留镜像尾部 fwtool 元数据（sysupgrade 校验依赖，处理后回填）；
 #   6. 纯 python3 实现分区表操作，不依赖 fdisk/parted/sgdisk 等工具。
 #
@@ -200,13 +201,19 @@ if is_gpt:
     ecrc = zlib.crc32(bytes(entries)) & 0xFFFFFFFF
 
     old_backup_lba = struct.unpack_from("<Q", hdr, 32)[0]
-    f.seek(old_backup_lba * SECT)
-    bh = f.read(512)
-    if bh[:8] != b"EFI PART":
-        die("备份 GPT 头缺失或损坏")
-    bh = bytearray(bh)
-    old_b_ent_lba = struct.unpack_from("<Q", bh, 72)[0]
     d = delta // SECT  # 扩容扇区数
+    new_backup_lba = old_backup_lba + d
+
+    # 尝试读取原备份 GPT 头：
+    #   注意: OpenWrt 的 ptgen 默认省略备份 GPT 表（alternate 分区表不写入镜像,
+    #   见 ptgen.c "The alternate partition table (We omit it by default)"）,
+    #   备份头可能不存在, 甚至位置超出物理文件末尾, 均按"缺失"处理。
+    f.seek(old_backup_lba * SECT)
+    bh_raw = f.read(512)
+    has_backup = len(bh_raw) == 512 and bh_raw[:8] == b"EFI PART"
+    if has_backup:
+        bh = bytearray(bh_raw)
+        old_b_ent_lba = struct.unpack_from("<Q", bh, 72)[0]
 
     def fix_header_crc(h):
         """按 GPT 规范重算头 CRC32（校验字段本身清零后计算）"""
@@ -215,33 +222,55 @@ if is_gpt:
         struct.pack_into("<I", h, 16, zlib.crc32(bytes(h[:hs])) & 0xFFFFFFFF)
 
     # 4.2 更新主 GPT 头: 备份头位置/最后可用 LBA/表项 CRC
-    struct.pack_into("<Q", hdr, 32, old_backup_lba + d)
+    struct.pack_into("<Q", hdr, 32, new_backup_lba)
     struct.pack_into("<Q", hdr, 48, struct.unpack_from("<Q", hdr, 48)[0] + d)
     struct.pack_into("<I", hdr, 88, ecrc)
     fix_header_crc(hdr)
-    # 4.3 更新备份 GPT 头: 自身位置/表项位置/最后可用 LBA/表项 CRC
-    struct.pack_into("<Q", bh, 24, old_backup_lba + d)
-    struct.pack_into("<Q", bh, 48, struct.unpack_from("<Q", bh, 48)[0] + d)
-    struct.pack_into("<Q", bh, 72, old_b_ent_lba + d)
-    struct.pack_into("<I", bh, 88, ecrc)
-    fix_header_crc(bh)
-    # 4.4 写回: 主表项 / 备份表项 / 主头 / 备份头
+
+    ent_sectors = ent_cnt * ent_sz // SECT  # 表项区占用扇区数(128项×128B=32扇区)
+
+    if has_backup:
+        # 4.3a 原备份头存在 → 更新字段并整体迁移到新文件末尾
+        struct.pack_into("<Q", bh, 24, new_backup_lba)
+        struct.pack_into("<Q", bh, 48, struct.unpack_from("<Q", bh, 48)[0] + d)
+        struct.pack_into("<Q", bh, 72, old_b_ent_lba + d)
+        struct.pack_into("<I", bh, 88, ecrc)
+        fix_header_crc(bh)
+        f.seek((old_b_ent_lba + d) * SECT)
+        f.write(entries)
+        f.seek(new_backup_lba * SECT)
+        f.write(bh)
+        print("    已更新 GPT 分区表, 迁移备份表头并重算 CRC32")
+    else:
+        # 4.3b 原备份 GPT 表缺失（ptgen 默认省略）→ 按 GPT 规范在扩容后的
+        #      文件末尾补建完整备份结构（备份表项区 + 备份 GPT 头）,
+        #      使固件拥有标准 GPT 双表布局, 工具与内核读取更友好。
+        bh = bytearray(hdr)                                   # 基于更新后的主头
+        struct.pack_into("<Q", bh, 24, new_backup_lba)        # 备份头自身 LBA
+        struct.pack_into("<Q", bh, 32, 1)                     # alternate 指回主头(LBA1)
+        struct.pack_into("<Q", bh, 72, new_backup_lba - ent_sectors)  # 备份表项区起始
+        # entry_crc32(88) 与主头一致(已随 hdr 复制), 重算头 CRC
+        fix_header_crc(bh)
+        f.seek((new_backup_lba - ent_sectors) * SECT)
+        f.write(entries)
+        f.seek(new_backup_lba * SECT)
+        f.write(bh)
+        print("    已更新 GPT 分区表; 原镜像无备份 GPT 表(ptgen 默认省略), "
+              "已按规范补建备份表项区与备份头")
+
+    # 4.4 写回: 主表项区 / 主 GPT 头
     f.seek(ent_lba * SECT)
-    f.write(entries)
-    f.seek((old_b_ent_lba + d) * SECT)
     f.write(entries)
     f.seek(SECT)
     f.write(hdr)
-    f.seek((old_backup_lba + d) * SECT)
-    f.write(bh)
-    new_table_end = (old_backup_lba + d + 1) * SECT
+    new_table_end = (new_backup_lba + 1) * SECT
     # 4.5 同步保护 MBR（0xEE 项）的容量字段与 CHS 上限
     new_total_sect = new_table_end // SECT
     f.seek(446 + 12)
     f.write(struct.pack("<I", min(0xFFFFFFFF, new_total_sect - 1)))
     f.seek(446 + 5)
     f.write(bytes([0xFE, 0xFF, 0xFF]))
-    print("    已更新 GPT 分区表, 迁移备份表头并重算 CRC32")
+    print("    已同步 GPT 保护 MBR 容量字段")
 else:
     # MBR: 更新分区项扇区数, CHS 结束地址置为上限(FE FF FF)
     new_cnt = new_part // SECT
