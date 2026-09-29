@@ -206,6 +206,12 @@ jobs:
         env:
           # 使用内置 GITHUB_TOKEN 创建 Release（顶部已配置 contents: write）
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # 显式指定 gh 命令操作的目标仓库为本仓库：
+          # 本步骤 working-directory 是 ImmortalWrt 源码克隆目录,
+          # gh 会按当前目录的 git remote 误解析到 immortalwrt/immortalwrt
+          # （对该仓库无写权限, 导致创建 Release 时返回 403）,
+          # 因此必须显式指向本仓库
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
