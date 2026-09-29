@@ -26,9 +26,13 @@ DEST_DIR="package/thirdparty"
 # ---------------------------------------------------------------
 SOURCES=(
   # --- 常驻第三方插件（ImmortalWrt 源码不含，需要拉取） ---
-  "luci-app-turboacc|https://github.com/kenzok8/small-package|master|other/lean/luci-app-turboacc|"
-  "easytier|https://github.com/EasyTier/luci-app-easytier|master|easytier|"
-  "luci-app-easytier|https://github.com/EasyTier/luci-app-easytier|master|luci-app-easytier|"
+  #   注意：分支名以各仓库实际默认分支为准（2026-09 核实）：
+  #   kenzok8/small-package = main, EasyTier/luci-app-easytier = main,
+  #   linkease/nas-packages = master, linkease/nas-packages-luci = main;
+  #   若上游日后改动分支名, 脚本会自动回退到该仓库的默认分支
+  "luci-app-turboacc|https://github.com/kenzok8/small-package|main|other/lean/luci-app-turboacc|"
+  "easytier|https://github.com/EasyTier/luci-app-easytier|main|easytier|"
+  "luci-app-easytier|https://github.com/EasyTier/luci-app-easytier|main|luci-app-easytier|"
   "ddnsto|https://github.com/linkease/nas-packages|master|network/services/ddnsto|"
   "luci-app-ddnsto|https://github.com/linkease/nas-packages-luci|main|luci/luci-app-ddnsto|"
   # --- 备用来源（当前 ImmortalWrt 源码已自带，正常情况下不会触发克隆） ---
@@ -68,12 +72,31 @@ done
 
 # ---------------------------------------------------------------
 # 第二步：逐仓库浅克隆（稀疏检出所需目录），拷贝至 package/thirdparty/
+#   指定分支不存在时自动回退到仓库默认分支，避免上游改动分支名导致构建失败
 # ---------------------------------------------------------------
+clone_repo() {
+  local repo=$1 branch=$2 dest=$3 def
+  # 优先按来源表指定的分支克隆
+  if git clone -q --depth 1 --filter=blob:none --sparse -b "$branch" "$repo" "$dest" 2>/dev/null; then
+    return 0
+  fi
+  # 指定分支不存在 → 解析该仓库的默认分支（HEAD 符号引用）并回退重试
+  def=$(git ls-remote --symref "$repo" HEAD 2>/dev/null \
+        | awk '/^ref:/ { sub(".*refs/heads/", ""); print $1 }' | head -n 1)
+  if [ -n "$def" ] && [ "$def" != "$branch" ]; then
+    echo "    注意: 分支 $branch 不存在, 自动回退到默认分支 $def"
+    git clone -q --depth 1 --filter=blob:none --sparse -b "$def" "$repo" "$dest"
+  else
+    echo "错误: 无法克隆仓库 $repo (尝试分支: $branch / $def)" >&2
+    return 1
+  fi
+}
+
 for key in "${!REPO_PKGS[@]}"; do
   IFS='|' read -r repo branch <<< "$key"
   tmp=$(mktemp -d)
   echo "==> 克隆仓库 $repo (分支 $branch, 仅稀疏检出插件目录)"
-  git clone -q --depth 1 --filter=blob:none --sparse -b "$branch" "$repo" "$tmp/src"
+  clone_repo "$repo" "$branch" "$tmp/src"
 
   read -r -a entries <<< "${REPO_PKGS[$key]}"
   # 收集该仓库需要检出的全部子目录
