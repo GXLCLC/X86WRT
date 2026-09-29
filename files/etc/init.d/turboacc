@@ -1,0 +1,168 @@
+#!/bin/sh /etc/rc.common
+# ================================================================
+# files/etc/init.d/turboacc
+#
+# 覆盖 luci-app-turboacc（kenzok8/small-package）自带的 init 脚本，
+# 修复其在 firewall4(nftables) 固件上状态误报的问题：
+#
+#  上游问题 1：check_status fastpath 只检测 /sys/module/xt_FLOWOFFLOAD，
+#             而 firewall4 实际加载的是 nft_flow_offload 模块，
+#             导致软件分载已生效却显示 "NOT RUNNING"；
+#  上游问题 2：check_status fullconenat 使用 iptables 命令检测，
+#             ImmortalWrt 已全面切换 nftables，命令不存在导致误报；
+#  上游问题 3：inital_conf 只检测 xt_FLOWOFFLOAD.ko，firewall4 固件
+#             需要的是 nft_flow_offload.ko。
+#
+# 其余逻辑（uci 同步 firewall、BBR sysctl、SFE/WED 加载）保持不变。
+# ================================================================
+
+START=90
+STOP=10
+
+EXTRA_COMMANDS="check_status"
+EXTRA_HELP="	check_status Check running status of utils"
+
+inital_conf(){
+	config_load "turboacc"
+	config_get "hw_wed" "config" "hw_wed" "0"
+	config_get "hw_flow" "config" "hw_flow" "0"
+	config_get "sw_flow" "config" "sw_flow" "0"
+	config_get "sfe_flow" "config" "sfe_flow" "0"
+	config_get "bbr_cca" "config" "bbr_cca" "0"
+	config_get "fullcone_nat" "config" "fullcone_nat" "0"
+
+	# firewall4(nftables) 的软件/硬件分载均由 nft_flow_offload 模块提供；
+	# 兼容保留旧 fw3(iptables) 的 xt_FLOWOFFLOAD 模块检测
+	if [ ! -e "/lib/modules/$(uname -r)/nft_flow_offload.ko" ] && \
+	   [ ! -e "/lib/modules/$(uname -r)/xt_FLOWOFFLOAD.ko" ]; then
+		sw_flow="0"
+		hw_flow="0"
+	fi
+	[ ! -e "/lib/modules/$(uname -r)/tcp_bbr.ko" ] && bbr_cca="0"
+}
+
+load_sfe() {
+	local kernel_version=$(uname -r)
+
+	[ -e "/lib/modules/$kernel_version/shortcut-fe-cm.ko" ] && modprobe shortcut-fe-cm
+	[ -e "/lib/modules/$kernel_version/fast-classifier.ko" ] && modprobe fast-classifier
+}
+
+unload_sfe() {
+	[ -d /sys/module/shortcut_fe_cm ] && rmmod shortcut_fe_cm
+	[ -d /sys/module/fast_classifier ] && rmmod fast_classifier
+}
+
+load_wed() {
+	local kernel_version=$(uname -r)
+
+	grep -Eq 'mediatek' /etc/openwrt_release && \
+	    ! grep -Eq 'mt7915e' /etc/modules.conf && \
+		[ -e "/lib/modules/$kernel_version/mt7915e.ko" ] && {
+			sed -i '$aoptions mt7915e wed_enable=Y' /etc/modules.conf
+			rmmod mt7915e && sleep 1 && modprobe mt7915e && wifi up
+		}
+}
+
+unload_wed() {
+	local kernel_version=$(uname -r)
+
+	grep -Eq 'mediatek' /etc/openwrt_release && \
+	    grep -Eq 'mt7915e' /etc/modules.conf && \
+		[ -e "/lib/modules/$kernel_version/mt7915e.ko" ] && {
+			sed -i '/mt7915e/d' /etc/modules.conf
+			rmmod mt7915e && sleep 1 && modprobe mt7915e && wifi up
+		}
+}
+
+start(){
+	inital_conf
+
+	uci set firewall.@defaults[0].flow_offloading="${sw_flow}"
+	uci set firewall.@defaults[0].flow_offloading_hw="${hw_flow}"
+	uci set firewall.@defaults[0].fullcone="${fullcone_nat}"
+	uci commit firewall
+
+	[ "${sw_flow}" -ne "1" ] && [ "${sfe_flow}" -eq "1" ] && {
+		load_sfe
+	}
+
+	[ "${hw_flow}" -eq "1" ] && [ "${hw_wed}" -eq "1" ] && {
+		load_wed
+	}
+
+	if [ "${bbr_cca}" -eq "1" ];  then
+		sysctl -w net.ipv4.tcp_congestion_control="bbr"
+	else
+		sysctl -w net.ipv4.tcp_congestion_control="cubic"
+	fi
+}
+
+stop(){
+	inital_conf
+
+	uci set firewall.@defaults[0].flow_offloading="${sw_flow}"
+	uci set firewall.@defaults[0].flow_offloading_hw="${hw_flow}"
+	uci set firewall.@defaults[0].fullcone="${fullcone_nat}"
+	uci commit firewall
+
+	[ "${hw_wed}" -eq "0" ] && {
+		unload_wed
+	}
+
+	unload_sfe
+}
+
+restart(){
+	stop
+	start
+
+	/etc/init.d/firewall restart >"/dev/null" 2>&1
+}
+
+check_status(){
+	case "$1" in
+	"fastpath")
+		# firewall4(nftables)：fw4 生成 flowtable 时自动加载 nft_flow_offload
+		if [ -d /sys/module/nft_flow_offload ] || \
+		   [ "$(cat "/sys/module/xt_FLOWOFFLOAD/refcnt" 2>"/dev/null" || echo 0)" -ne "0" ]; then
+			echo -n "Flow Offloading"
+			exit 0
+		elif [ "$(cat "/sys/module/xt_FLOWOFFLOAD/refcnt" 2>"/dev/null")" -eq "0" ] && \
+		    [ -e /sys/kernel/debug/hnat/hnat_version ]; then
+			echo -n "MediaTek HWNAT"
+			exit 0
+		elif [ -d /sys/kernel/debug/ecm/ecm_nss_ipv4 ]; then
+			echo -n "QCA-NSS-ECM"
+			exit 0
+		elif [ -d /sys/kernel/debug/ecm/ecm_sfe_ipv4 ]; then
+			echo -n "QCA-ECM-SFE"
+			exit 0
+		elif [ -d /sys/module/fast_classifier ]; then
+			echo -n "Shortcut-FE"
+			exit 0
+		elif [ -d /sys/module/shortcut_fe_cm ]; then
+			echo -n "Shortcut-FE ECM"
+			exit 0
+		else
+			exit 1
+		fi
+		;;
+	"fullconenat")
+		# firewall4 的 FullCone NAT 由 nftables fullcone 表达式实现，
+		# 检测 fw4 生成的规则中是否包含 fullcone
+		if [ -n "$(nft list ruleset 2>"/dev/null" | grep -i fullcone)" ]; then
+			exit 0
+		else
+			exit 1
+		fi
+		;;
+	"bbr")
+		[ "x$(cat "/proc/sys/net/ipv4/tcp_congestion_control" 2>"/dev/null")" = "xbbr" ] && \
+			exit 0 || exit 1
+		;;
+	*)
+		exit 2
+		;;
+	esac
+}

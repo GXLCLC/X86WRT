@@ -1,0 +1,26 @@
+# ================================================================
+# files/etc/config/turboacc
+#
+# 覆盖 luci-app-turboacc 包的出厂默认配置（files/ 目录在打包时
+# 后于软件包复制进 rootfs，同名文件直接覆盖包内默认值）。
+#
+#【默认策略】
+#   BBR 拥塞控制        开启 —— 对 TCP 吞吐有实际收益，无副作用；
+#   软件流量分载        关闭 —— 分载流量走内核快速路径，绕过
+#                             conntrack 计数，nlbwmon（带宽监控）
+#                             将统计不到任何数据，二者互斥；
+#   硬件流量分载        关闭 —— x86 平台无实际硬件分载收益；
+#   Shortcut-FE         关闭 —— 当前内核未集成 SFE 模块；
+#   FullCone NAT        开启 —— 固件已含 nft_fullcone 模块。
+#
+# 如需极限转发性能，可在 LuCI「Turbo ACC」页面自行开启
+# "软件流量分载"，但带宽监控（nlbwmon）将无法统计分载流量。
+# ================================================================
+
+config turboacc 'config'
+	option sw_flow '0'
+	option hw_flow '0'
+	option sfe_flow '0'
+	option fullcone_nat '1'
+	option hw_wed '0'
+	option bbr_cca '1'

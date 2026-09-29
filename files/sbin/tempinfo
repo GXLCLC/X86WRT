@@ -1,0 +1,30 @@
+#!/bin/sh
+# ================================================================
+# files/sbin/tempinfo
+#
+# x86 平台温度信息脚本，供 LuCI 状态页（rpcd luci.getTempInfo）
+# 调用，在"系统概览"页显示独立的 Temperature（温度）行。
+#
+# 说明：ImmortalWrt 的 autocore 包在 x86 平台只安装 /sbin/cpuinfo
+# （频率+温度合并显示在"架构"行），不安装 /sbin/tempinfo；
+# 此脚本补齐 /sbin/tempinfo，让温度单独成行显示。
+#
+# 读取顺序：
+#   1. lm-sensors（sensors 命令，autocore 依赖自动安装）
+#      —— Intel coretemp 的 "Package id"、AMD k10temp 的 Tctl/Tdie；
+#   2. 回退 ACPI thermal_zone0。
+#
+# 注：写法与 autocore 官方 cpuinfo 脚本保持一致
+# （grep -Eo '...°C'，°C 作为字面字符串按字节匹配，
+# 避免多字节字符类在 busybox grep 下的兼容性问题）。
+# ================================================================
+
+temp="$(sensors 2>"/dev/null" | grep -E '(Package id |Tctl|Tdie)' | grep -Eo '[+][0-9.]*°C' | head -n1 | tr -d '+')"
+
+[ -n "$temp" ] || temp="$(awk '{printf("%.1f°C", $0 / 1000)}' /sys/class/thermal/thermal_zone0/temp 2>"/dev/null")"
+
+if [ -n "$temp" ]; then
+	echo -n "$temp"
+else
+	echo -n "No temperature info"
+fi

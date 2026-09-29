@@ -21,13 +21,18 @@
 | DDNSTO | 远程控制（前端 + 后端） | 第三方：linkease/nas-packages-luci + nas-packages |
 | AdGuard Home | 去广告 DNS | 源码自带 |
 | OAF 应用过滤 | 应用过滤 / 上网管控 | 源码自带 |
-| TurboAcc | 软件流量分载 + BBR 加速 | 第三方：kenzok8/small-package |
-| Mwan3 | 多线多拨 / 负载均衡 | 源码自带 |
+| TurboAcc | BBR 加速默认开启；软件流量分载默认关闭（与带宽监控互斥，见下方说明） | 第三方：kenzok8/small-package |
+| Mwan3 | 多线多拨 / 负载均衡（默认禁用，需要时自行开启） | 源码自带 |
 | 带宽监控 | nlbwmon | 源码自带 |
-| EasyTier | 内网穿透 | 第三方：EasyTier/luci-app-easytier |
+| UPnP | UPnP IGD / NAT-PMP 端口自动映射 | 源码自带 |
+| 定时重启 | 按计划自动重启路由器 | 源码自带 |
+| EasyTier | 内网穿透（核心 + Web 控制台默认启用，`http://192.168.1.1:11211`） | 第三方：EasyTier/luci-app-easytier |
+| autocore | 状态页 CPU 频率 / 温度显示 | 源码自带 |
 | Argon 主题 + argon-config | 主题与主题设置 | 源码自带 |
 
 > 拉取规则：**优先使用 ImmortalWrt 源码自带软件包**；仅当源码中不存在时，才从第三方仓库浅克隆所需插件目录（不完整拉取整个仓库），由 [scripts/packages.sh](scripts/packages.sh) 自动完成。
+
+**Turbo ACC 与带宽监控的取舍**：软件流量分载（Flow Offloading）开启后，转发流量走内核快速路径，绕过 conntrack 计数，nlbwmon 带宽监控将统计不到数据，**二者互斥**。因此固件默认开启 BBR 拥塞控制、关闭软件分载（保证带宽监控可用）；如需极限转发性能，可在 LuCI「网络 → Turbo ACC」自行开启"软件流量分载"，届时带宽监控将无法统计分载流量。
 
 **驱动**：内置 USB2/USB3 主机控制器、OHCI/UHCI、USB 存储（含 UAS）、USB 网卡（CDC-ETHER/NCM 等），以及英特尔（e1000/e1000e/igb/igc/ixgbe/i40e 等）与瑞昱（r8169/8139 等）系列有线网卡驱动。
 
