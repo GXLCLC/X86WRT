@@ -1,0 +1,19 @@
+# ================================================================
+# files/etc/config/mwan3
+#
+# 覆盖 mwan3 包自带的出厂配置（files/ 目录在打包时后于软件包复制
+# 进 rootfs，同名文件直接覆盖包内默认值）。
+#
+# mwan3 包默认携带 wan/wan6/wanb/wanb6 四个示例 interface 段及
+# member/policy/rule 示例段 —— 即使全部 enabled=0，LuCI「多线多拨
+# 状态总览（MultiWAN Manager）」也会按 interface 段渲染出接口卡片，
+# 呈现"已配置"状态。
+#
+# 本固件默认单 WAN 环境，仅保留空 globals 段：状态总览显示为
+# 未配置（无任何 MWAN 接口）；需要多线负载时在 LuCI
+# 「网络 → 多线多拨」中自行添加接口/成员/策略/规则即可。
+# ================================================================
+
+config globals 'globals'
+	option mmx_mask '0x3F00'
+	option local_source 'none'

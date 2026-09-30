@@ -144,6 +144,24 @@ cat <<EOF
 | 用户名 | root |
 | 密码 | password |
 
+## AdGuard Home 去广告
+
+| 项目 | 内容 |
+| --- | --- |
+| 管理页面 | http://192.168.1.1:3000 |
+| 用户名 / 密码 | admin / admin |
+| 重定向模式 | dnsmasq 上游（LAN DNS :53 → AdGuardHome :5553 → 公网 DNS） |
+| 过滤规则 | 内置 AdGuard DNS filter / EasyList / EasyList China / anti-AD 等中文优化规则，每 24 小时自动更新 |
+
+> 广告过滤默认开箱即用；如需停止过滤，在「服务 → AdGuard Home → 基础设置」将重定向模式改为"不启用"即可。
+> 注意：AdGuard Home 与 OpenClash 的 DNS 劫持不宜同时开启，以免互相干扰。
+
+## 默认服务状态
+
+- **Turbo ACC**：默认开启 BBR 拥塞控制与 FullCone NAT；软件/硬件流量分载默认关闭（分载走内核快速路径会绕过流量统计，与带宽监控互斥）。状态页按防火墙真实规则显示分载运行状态，可随时在「网络 → Turbo ACC」中开关；
+- **带宽监控**：服务 → Bandwidth Monitor，开机自启，按主机/协议统计流量（首次需产生流量后才有数据）；
+- **Mwan3 多线多拨**：默认未配置（无任何接口/策略/规则），需要多线负载时在「网络 → 多线多拨」中自行添加。
+
 ## 已安装插件
 
 EOF

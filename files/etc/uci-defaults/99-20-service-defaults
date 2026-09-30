@@ -3,24 +3,44 @@
 # files/etc/uci-defaults/99-20-service-defaults
 #
 # 【作用】按需求修正各服务的出厂默认状态：
-#   1. Mwan3 多线负载均衡默认禁用（单 WAN 场景无需启用，
-#      修复状态页默认显示"已配置"的问题，需要时可在
-#      LuCI「网络 → 多线多拨」中自行开启）；
+#   1. Mwan3 多线多拨：清空全部示例配置，恢复"未配置"状态
+#      （状态总览按 interface 段渲染，仅设 enabled=0 仍会显示
+#      接口卡片；files/etc/config/mwan3 已只保留空 globals，
+#      此处再兜底删除一次，防止包内默认值因拷贝顺序回写）；
 #   2. EasyTier 默认启用核心与 Web 控制台（修复状态总览
 #      一直显示"正在收集数据"、无核心无 Web 页面的问题）；
-#   3. 防火墙默认关闭软件/硬件流量分载 —— 分载流量走内核
-#      快速路径，绕过 conntrack 计数，nlbwmon（带宽监控）
-#      将统计不到数据，二者互斥；BBR 加速不受影响，默认开启
+#   3. AdGuard Home：停用二进制包自带的小写 adguardhome 服务
+#      （与 kenzok8 前端的 /etc/init.d/AdGuardHome 会争抢同一
+#      二进制），启用前端服务并兜底默认参数（开启 + dnsmasq
+#      上游重定向，广告过滤开箱即用）；
+#   4. nlbwmon（带宽监控）：确保开机自启；
+#   5. 防火墙默认关闭软件/硬件流量分载 —— 分载流量走内核
+#      快速路径，绕过 conntrack 计数，nlbwmon 将统计不到数据，
+#      二者互斥；BBR 加速不受影响，默认开启
 #      （见 files/etc/config/turboacc）。
 #
-#【运行机制】/etc/uci-defaults/ 下的脚本在系统首次启动时自动
-#   执行一次，执行成功（exit 0）后由系统自动删除。
+#【运行机制】/etc/uci-defaults/ 下的脚本在系统首次启动时（S10 boot
+#   阶段，早于各服务启动）自动执行一次，成功后由系统删除。
 # ================================================================
 
-# -------- 1. Mwan3：默认关闭 --------
-# wan 接口的 mwan3 管理开关设为 0 后，mwan3 不创建任何策略路由
-# 与防火墙规则，状态页显示未启用
-uci -q set mwan3.wan.enabled='0'
+# -------- 1. Mwan3：清空示例配置，恢复未配置状态 --------
+while uci -q get mwan3.@interface[0] >/dev/null 2>&1; do
+	uci -q delete mwan3.@interface[0]
+done
+while uci -q get mwan3.@member[0] >/dev/null 2>&1; do
+	uci -q delete mwan3.@member[0]
+done
+while uci -q get mwan3.@policy[0] >/dev/null 2>&1; do
+	uci -q delete mwan3.@policy[0]
+done
+while uci -q get mwan3.@rule[0] >/dev/null 2>&1; do
+	uci -q delete mwan3.@rule[0]
+done
+while uci -q get mwan3.@notify[0] >/dev/null 2>&1; do
+	uci -q delete mwan3.@notify[0]
+done
+uci -q set mwan3.globals.mmx_mask='0x3F00'
+uci -q set mwan3.globals.local_source='none'
 uci -q commit mwan3
 
 # -------- 2. EasyTier：默认启用核心 + Web 控制台 --------
@@ -35,11 +55,26 @@ uci -q set easytier.@easytier[0].web_html_port='11211'
 uci -q set easytier.@easytier[0].web_db_path='/etc/easytier/et.db'
 uci -q commit easytier
 
-# -------- 3. 防火墙：默认关闭流量分载（保 nlbwmon 统计） --------
+# -------- 3. AdGuard Home：解决双 init 冲突 + 兜底默认参数 --------
+# 二进制包（adguardhome）自带小写 /etc/init.d/adguardhome，与
+# kenzok8 前端的大写 /etc/init.d/AdGuardHome 同时开机自启会争抢
+# 同一个 /usr/bin/AdGuardHome 进程；本脚本在 S10 阶段运行，
+# 早于二者的 START（19/95），此处停用小写版即可避免冲突
+[ -x /etc/init.d/adguardhome ] && /etc/init.d/adguardhome disable >/dev/null 2>&1
+[ -x /etc/init.d/AdGuardHome ] && /etc/init.d/AdGuardHome enable >/dev/null 2>&1
+# 默认参数（files/etc/config/AdGuardHome 已带，此处兜底确保取值）
+uci -q set AdGuardHome.AdGuardHome.enabled='1'
+uci -q set AdGuardHome.AdGuardHome.httpport='3000'
+uci -q set AdGuardHome.AdGuardHome.redirect='dnsmasq-upstream'
+uci -q commit AdGuardHome
+
+# -------- 4. nlbwmon（带宽监控）：确保开机自启 --------
+[ -x /etc/init.d/nlbwmon ] && /etc/init.d/nlbwmon enable >/dev/null 2>&1
+
+# -------- 5. 防火墙：默认关闭流量分载（保 nlbwmon 统计） --------
+# 首次启动时 firewall(S19) 尚未加载规则，此处仅落盘配置即可生效
 uci -q set firewall.@defaults[0].flow_offloading='0'
 uci -q set firewall.@defaults[0].flow_offloading_hw='0'
 uci -q commit firewall
-# 固件内置默认值为 1，fw4 已按 1 加载过规则，需 reload 生效
-/etc/init.d/firewall reload >"/dev/null" 2>&1 || true
 
 exit 0

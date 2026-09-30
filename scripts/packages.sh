@@ -7,9 +7,11 @@
 #   2. 仅当源码仓库中不存在对应软件包时，才从下表所列第三方仓库
 #      浅克隆所需插件目录（git clone --depth 1 --filter=blob:none
 #      --sparse，只检出插件目录本身，不完整拉取整个仓库）；
-#   3. DDNSTO 同时拉取 luci 前端（nas-packages-luci, main 分支）
+#   3. FORCE_SOURCES 强制覆盖表中的包例外：无论源码是否自带，
+#      一律移除 feeds 软链接后使用第三方版本（如 luci-app-adguardhome）；
+#   4. DDNSTO 同时拉取 luci 前端（nas-packages-luci, main 分支）
 #      与后端程序包（nas-packages, master 分支），缺一不可；
-#   4. 第三方包统一放置于 package/thirdparty/ 下参与编译。
+#   5. 第三方包统一放置于 package/thirdparty/ 下参与编译。
 #
 # 用法（工作流内自动执行，也可本地手动执行）：
 #   cd <ImmortalWrt 源码目录>
@@ -39,10 +41,21 @@ SOURCES=(
   "smartdns|https://github.com/kenzok8/openwrt-packages|master|smartdns|"
   "luci-app-smartdns|https://github.com/kenzok8/openwrt-packages|master|luci-app-smartdns|"
   "adguardhome|https://github.com/kenzok8/openwrt-packages|master|adguardhome|"
-  "luci-app-adguardhome|https://github.com/kenzok8/openwrt-packages|master|luci-app-adguardhome|"
   "luci-theme-argon|https://github.com/kenzok8/openwrt-packages|master|luci-theme-argon|"
   "luci-app-argon-config|https://github.com/kenzok8/openwrt-packages|master|luci-app-argon-config|"
   "luci-app-openclash|https://github.com/vernesong/OpenClash|master|.|"
+)
+
+# ---------------------------------------------------------------
+# 强制覆盖表：格式与来源表相同。
+# 表内包无论源码/feeds 中是否存在，一律以下方第三方仓库版本为准：
+#   luci-app-adguardhome —— ImmortalWrt 自带版为精简 JS 版，缺少
+#     “网页管理端口”“重定向模式”等配置界面，且服务默认停用、无
+#     预置过滤规则，广告过滤无法开箱即用；kenzok8 增强版（Lua CBI）
+#     提供完整中文配置界面 + 内置中文优化规则模板，故强制覆盖。
+# ---------------------------------------------------------------
+FORCE_SOURCES=(
+  "luci-app-adguardhome|https://github.com/kenzok8/openwrt-packages|master|luci-app-adguardhome|"
 )
 
 # 判断包是否已存在于 ImmortalWrt 源码（package/ 或 feeds/ 目录）
@@ -52,12 +65,38 @@ pkg_exists() {
   [ -n "$found" ]
 }
 
+# 移除 feeds 中同名包已安装到 package/feeds/ 的软链接（含 feeds 自动
+# 生成的语言包 luci-i18n-<pkg>-*），避免与 package/thirdparty/ 内的
+# 第三方版本产生同名包冲突。
+# 注意：只删 package/feeds/ 下的软链接，不动 feeds/ 源仓库本身，
+# 保证 feeds git 缓存的完整性不受影响。
+remove_feed_links() {
+  local pkg=$1 link
+  find package/feeds -maxdepth 2 \( -name "$pkg" -o -name "luci-i18n-$pkg-*" \) \
+    -print 2>/dev/null | while read -r link; do
+      rm -rf "$link"
+      echo "    已移除 feeds 软链接: $link"
+    done
+}
+
 mkdir -p "$DEST_DIR"
 
 # ---------------------------------------------------------------
 # 第一步：筛选出源码中不存在的包，按“仓库+分支”分组，同一仓库只克隆一次
 # ---------------------------------------------------------------
 declare -A REPO_PKGS   # 键: repo|branch -> 值: “包名:子目录 空格分隔”
+
+# 1a. 强制覆盖包：先移除 feeds 版软链接，再登记克隆（视同源码缺失）
+for line in "${FORCE_SOURCES[@]}"; do
+  IFS='|' read -r pkg repo branch subdir alt <<< "$line"
+  name=${alt:-$pkg}
+  echo "[覆盖] $pkg —— 强制使用第三方版本（源码自带版功能缺失）"
+  remove_feed_links "$pkg"
+  key="$repo|$branch"
+  REPO_PKGS["$key"]+="$name:$subdir "
+done
+
+# 1b. 常规包：源码已存在则跳过，缺失才登记克隆
 for line in "${SOURCES[@]}"; do
   IFS='|' read -r pkg repo branch subdir alt <<< "$line"
   name=${alt:-$pkg}

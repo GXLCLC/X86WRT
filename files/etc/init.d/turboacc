@@ -3,17 +3,22 @@
 # files/etc/init.d/turboacc
 #
 # 覆盖 luci-app-turboacc（kenzok8/small-package）自带的 init 脚本，
-# 修复其在 firewall4(nftables) 固件上状态误报的问题：
+# 修复其在 firewall4(nftables) 固件上的两处问题：
 #
-#  上游问题 1：check_status fastpath 只检测 /sys/module/xt_FLOWOFFLOAD，
-#             而 firewall4 实际加载的是 nft_flow_offload 模块，
-#             导致软件分载已生效却显示 "NOT RUNNING"；
+#  上游问题 1（状态误报"运行中"，导致用户以为分载无法关闭）：
+#    check_status fastpath 原以模块状态判定是否开启分载，但
+#    kmod-nft-flow-offload 包的 /etc/modules.d/nft-offload 会在开机
+#    时自动加载 nft_flow_offload 模块 —— 无论 firewall 的
+#    flow_offloading 是否开启，/sys/module/nft_flow_offload 都存在，
+#    状态页因此永远显示 "Flow Offloading 运行中"。
+#    正确判据是 nftables 规则集：fw4 仅在 flow_offloading=1 时才会
+#    生成 flowtable，关闭（firewall restart）后 flowtable 即消失。
+#
 #  上游问题 2：check_status fullconenat 使用 iptables 命令检测，
-#             ImmortalWrt 已全面切换 nftables，命令不存在导致误报；
-#  上游问题 3：inital_conf 只检测 xt_FLOWOFFLOAD.ko，firewall4 固件
-#             需要的是 nft_flow_offload.ko。
+#    ImmortalWrt 已全面切换 nftables，命令不存在导致误报。
 #
-# 其余逻辑（uci 同步 firewall、BBR sysctl、SFE/WED 加载）保持不变。
+# 其余逻辑（uci 同步 firewall、BBR sysctl、SFE/WED 加载、保存后
+# 经 ucitrack 触发 restart 从而重载防火墙）保持不变。
 # ================================================================
 
 START=90
@@ -31,8 +36,8 @@ inital_conf(){
 	config_get "bbr_cca" "config" "bbr_cca" "0"
 	config_get "fullcone_nat" "config" "fullcone_nat" "0"
 
-	# firewall4(nftables) 的软件/硬件分载均由 nft_flow_offload 模块提供；
-	# 兼容保留旧 fw3(iptables) 的 xt_FLOWOFFLOAD 模块检测
+	# 仅用于隐藏固件中不存在的选项：检测模块文件是否安装
+	# （不代表已加载，实际运行状态见 check_status）
 	if [ ! -e "/lib/modules/$(uname -r)/nft_flow_offload.ko" ] && \
 	   [ ! -e "/lib/modules/$(uname -r)/xt_FLOWOFFLOAD.ko" ]; then
 		sw_flow="0"
@@ -123,9 +128,18 @@ restart(){
 check_status(){
 	case "$1" in
 	"fastpath")
-		# firewall4(nftables)：fw4 生成 flowtable 时自动加载 nft_flow_offload
-		if [ -d /sys/module/nft_flow_offload ] || \
-		   [ "$(cat "/sys/module/xt_FLOWOFFLOAD/refcnt" 2>"/dev/null" || echo 0)" -ne "0" ]; then
+		# firewall4(nftables)：fw4 开启 flow_offloading 时才会在规则集
+		# 中生成 flowtable（硬件分载带 "flags offload"），据此判定真实
+		# 运行状态。模块加载状态不可作为判据（见文件头说明）。
+		if nft list ruleset 2>"/dev/null" | grep -q 'flowtable'; then
+			if nft list ruleset 2>"/dev/null" | grep -q 'flags offload'; then
+				echo -n "HW Flow Offloading"
+			else
+				echo -n "Flow Offloading"
+			fi
+			exit 0
+		# 以下为 fw3(iptables) 及其他平台加速的兼容检测
+		elif [ "$(cat "/sys/module/xt_FLOWOFFLOAD/refcnt" 2>"/dev/null" || echo 0)" -ne "0" ]; then
 			echo -n "Flow Offloading"
 			exit 0
 		elif [ "$(cat "/sys/module/xt_FLOWOFFLOAD/refcnt" 2>"/dev/null")" -eq "0" ] && \

@@ -1,0 +1,33 @@
+# ================================================================
+# files/etc/config/AdGuardHome
+#
+# 覆盖 kenzok8 版 luci-app-adguardhome 的出厂默认配置（files/
+# 目录在打包时后于软件包复制进 rootfs，同名文件直接覆盖包内默认值）。
+#
+#【默认策略】
+#   enabled           开启 —— 广告过滤开箱即用；
+#   httpport          3000 —— AdGuard Home 网页管理端口（Web + DNS
+#                             同进程，DNS 实际监听端口见 yaml 中
+#                             dns.port=5553）；
+#   redirect   dnsmasq-upstream —— dnsmasq(:53) 作为 LAN DNS 入口，
+#                             上游指向 127.0.0.1#5553，由 AdGuardHome
+#                             过滤后再转发公网 DNS，兼容 OpenClash 等
+#                             接管 dnsmasq 的插件（关闭本服务时自动还原）；
+#   waitonboot        开启 —— 等网络就绪后再启动，避免开机竞态；
+#   release_channel   stable —— 核心自动更新走稳定版通道。
+#
+# 管理页面: http://<路由器IP>:3000  默认账号密码见 Release 说明
+# ================================================================
+
+config AdGuardHome 'AdGuardHome'
+	option enabled '1'
+	option httpport '3000'
+	option redirect 'dnsmasq-upstream'
+	option configpath '/etc/AdGuardHome.yaml'
+	option workdir '/etc/AdGuardHome'
+	option logfile '/tmp/AdGuardHome.log'
+	option verbose '0'
+	option binpath '/usr/bin/AdGuardHome'
+	option waitonboot '1'
+	option release_channel 'stable'
+	option crontab 'autoupdate cutquerylog cutruntimelog'
